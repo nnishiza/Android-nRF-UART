@@ -54,6 +54,7 @@ public class UartService extends Service {
     private String mBluetoothDeviceAddress;
     private BluetoothGatt mBluetoothGatt;
     private int mConnectionState = STATE_DISCONNECTED;
+    private Object rxCharacteristicWriteLock = new Object();
 
     private static final int STATE_DISCONNECTED = 0;
     private static final int STATE_CONNECTING = 1;
@@ -80,6 +81,8 @@ public class UartService extends Service {
     public static final UUID RX_SERVICE_UUID = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e");
     public static final UUID RX_CHAR_UUID = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e");
     public static final UUID TX_CHAR_UUID = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e");
+
+    private static int TX_CHAR_SIZE = 20;
     
    
     // Implements callback methods for GATT events that the app cares about.  For example,
@@ -130,6 +133,17 @@ public class UartService extends Service {
         public void onCharacteristicChanged(BluetoothGatt gatt,
                                             BluetoothGattCharacteristic characteristic) {
             broadcastUpdate(ACTION_DATA_AVAILABLE, characteristic);
+        }
+
+        @Override
+        public void onCharacteristicWrite(BluetoothGatt gatt,
+                                          BluetoothGattCharacteristic characteristic,
+                                          int status) {
+            if (RX_CHAR_UUID.equals(characteristic.getUuid())) {
+                synchronized (rxCharacteristicWriteLock) {
+                    rxCharacteristicWriteLock.notifyAll();
+                }
+            }
         }
     };
 
@@ -343,12 +357,33 @@ public class UartService extends Service {
             broadcastUpdate(DEVICE_DOES_NOT_SUPPORT_UART);
             return;
         }
-        RxChar.setValue(value);
-    	boolean status = mBluetoothGatt.writeCharacteristic(RxChar);
-    	
-        Log.d(TAG, "write TXchar - status=" + status);  
+
+        try {
+            int i = 0;
+            while (i < value.length) {
+                int n = 20;
+                if (i + n > value.length) {
+                    n = value.length - i;
+                }
+
+                byte[] value1 = new byte[n];
+                System.arraycopy(value, i, value1, 0, n);
+                RxChar.setValue(value1);
+
+                boolean status;
+                synchronized (rxCharacteristicWriteLock) {
+                    status = mBluetoothGatt.writeCharacteristic(RxChar);
+                    rxCharacteristicWriteLock.wait();
+                }
+                Log.d(TAG, "write TXchar - status=" + status);
+
+                i += n;
+            }
+        } catch (InterruptedException e) {
+            showMessage("Rx charateristic sending interrupted!");
+        }
     }
-    
+
     private void showMessage(String msg) {
         Log.e(TAG, msg);
     }
